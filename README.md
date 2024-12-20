@@ -23,19 +23,20 @@ The subdirectory "runtime" contains the SignalJ runtime library, which is necess
 
 To use *persistent signals*, you are also required to set up TimescaleDB. You are also required to provide the following configuration information in the file /[path to your home directory]/signalj/properties/java.properties:
 
-url=[The URL of your database containing update histories of signals]
+```url=[The URL of your database containing update histories of signals]
 user=[The database user name]
 password=[Password for the user]
 admin=[The database administrator user name. You can leave this blank]
 adminpw=[Password for the administrator. You can leave this blank]
 distributed=false
+```
 
 You can also use a directory service for distributed persistent signals. In this case, the configuration should be as follows (note that currenly there are no public directory service):
 
-url=[The URL of directory service]
+```url=[The URL of directory service]
 user=[User name for the directory service]
 password=[Password for the directory service]
 admin=[Leave this blank]
 adminpw=[Leave this blank]
 distributed=true
-
+```
