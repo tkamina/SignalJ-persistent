@@ -1,8 +1,6 @@
 # SignalJ
 A compiler of SignalJ programming language.
 
-*This is the version used for the benchmark experiment in the paper "Consistent Distributed Reactive Programming with Retroactive Computation," submitted to the journal "The Art, Science, and Entineering of Programming." The latest version appears on the GitHub ...*
-
 This comiler is developped on the basis of ExtendJ, an extensible compiler of Java (http://jastadd.org/web/extendj/). All tools needed are included in ExtendJ. To build our compiler, you only need to have javac and Apache Ant.
 
 To build the SignalJ compiler, you need to follow the following instructions.
@@ -41,4 +39,3 @@ admin=[Leave this blank]
 adminpw=[Leave this blank]
 distributed=true
 
-If all these instructions are not sufficient, please consult the README file on the GitHub, or contact kamina@oita-u.ac.jp.
