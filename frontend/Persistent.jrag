@@ -1,0 +1,834 @@
+/* Copyright (c) 2019 - 2024, Tetsuo Kamina
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice,
+ * this list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
+ *
+ * 3. Neither the name of the copyright holder nor the names of its
+ * contributors may be used to endorse or promote products derived from this
+ * software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGE.
+ */
+import java.util.Vector;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Collection;
+
+aspect Persistent {
+
+  public boolean VarAccess.isPersistentSignalType() {
+    Modifiers m = decl().getModifiers();
+    if (m != null && m.isPersistent()) return true;
+    try { type(); } catch (Exception e) { return false; }
+    if (type() instanceof InterfaceDecl) {
+      if (((InterfaceDecl)type()).getID().equals("PersistentSignal")) return true;
+    }
+    if (decl().getInit() != null) {
+      return decl().getInit().containsPersistent();
+    }
+    return false;
+  }
+
+  public boolean VarAccess.isSignalClassInstance() {
+    try { type(); } catch (Exception e) { return false; }
+    if (type() instanceof ClassDecl) {
+      Modifiers m = type().getModifiers();
+      if (m != null && m.isSignal()) return true;
+      ClassDecl cdecl = (ClassDecl)type();
+      for (Access impl : cdecl.getImplementsList()) {
+        TypeAccess ta = (TypeAccess)impl;
+        if (ta.getPackage().equals("signalj.timeseries") && ta.getID().equals("SignalClassInstance")) return true;
+      }
+    }
+    return false;
+  }
+
+  public boolean Expr.containsPersistent() {
+    return containsSignal();
+  }
+
+  refine SignalValue public boolean VarAccess.containsSignal() {
+    try {
+      throw new Exception();
+    } catch (Exception e) {
+      if (isSignalType()) {
+        if (calledFromContainsPersistentSignal(e.getStackTrace())) {
+          return isPersistentSignalType();
+        } else {
+          return true;
+        }
+      } else return false;
+    }
+  }
+
+  private boolean VarAccess.calledFromContainsPersistentSignal(StackTraceElement[] trace) {
+    for (int i=0; i<trace.length; i++) {
+      StackTraceElement elm = trace[i];
+      if (!elm.getMethodName().equals("containsSignal")) {
+        if (elm.getMethodName().equals("containsPersistent")) return true;
+        else return false;
+      }
+    }
+    return false;
+  }
+
+  public ParseName ASTNode.parseName(String name) {
+    return new ParseName(new beaver.Symbol(name));
+  }
+
+  public static HashMap<String,Vector<Variable>> Program.persistentInitTable =
+    new HashMap<String,Vector<Variable>>();
+  public static HashMap<String,Vector<VarAccess>> Program.persistentDependency=
+    new HashMap<String,Vector<VarAccess>>();
+
+  public void CompilationUnit.analyzeSignalClasses() {
+    Vector<ClassDecl> classes = new Vector<ClassDecl>();
+    getClassDecls(classes);
+    for (ClassDecl cdecl : classes) {
+      if (cdecl.isSignalClass()) cdecl.updatePersistentInitTable(getPackageDecl());
+    }
+//    printPersistentInitTable();
+    for (ClassDecl cdecl : classes) {
+      if (cdecl.isSignalClass()) {
+        cdecl.updateConstructors(getPackageDecl());
+        cdecl.insertPrivateFields();
+        cdecl.removeSignalModifier();
+        cdecl.implementSignalClassInstance();
+        cdecl.flushAttrCache();
+      }
+    }
+  }
+
+  public TypeAccess TypeAccess.primitiveTypeConversion() {
+    if (getPackage().equals("java.lang")) {
+      if (getID().equals("Double")) return new PrimitiveTypeAccess("double");
+      if (getID().equals("Integer")) return new PrimitiveTypeAccess("int");
+      if (getID().equals("Float")) return new PrimitiveTypeAccess("float");
+      if (getID().equals("Long")) return new PrimitiveTypeAccess("long");
+      if (getID().equals("Short")) return new PrimitiveTypeAccess("short");
+      if (getID().equals("Byte")) return new PrimitiveTypeAccess("byte");
+    }
+    return this;
+  }
+
+  public void ClassDecl.implementSignalClassInstance() {
+    addImplements(new TypeAccess("signalj.timeseries", "SignalClassInstance"));
+
+    // discard method
+    Modifiers msDis = new Modifiers();
+    msDis.addModifier(new Modifier("public"));
+    Block blockDis = new Block(new List<Stmt>());
+    Vector<Variable> ps = sortFields(Program.persistentInitTable.get(packageName() + "." + getID()));
+    if (ps != null) {
+      Collections.reverse(ps);
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("discard", new List<Expr>())));
+        blockDis.addStmt(s);
+      }
+      Collections.reverse(ps);
+    }
+    MethodDecl disDecl = new MethodDecl(msDis, new PrimitiveTypeAccess("void"), "discard", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockDis));
+
+    // reset method
+    Modifiers msRes = new Modifiers();
+    msRes.addModifier(new Modifier("public"));
+    Block blockRes = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        if (p.getInit() == null) {
+          Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("reset", new List<Expr>())));
+          blockRes.addStmt(s);
+          break;
+        }
+      }
+    }
+    MethodDecl resDecl = new MethodDecl(msRes, new PrimitiveTypeAccess("void"), "reset", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockRes));
+
+    // ensureConsistency
+    Modifiers msConsist = new Modifiers();
+    msConsist.addModifier(new Modifier("public"));
+    Block blockConsist = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        if (p.getInit() != null) {
+	  Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("ensureConsistency", new List<Expr>().add(parseName("lastCheckPoint")).add(parseName("currentCheckPoint")))));
+	  blockConsist.addStmt(s);
+	  break;
+	}
+      }
+    }
+    List<ParameterDeclaration> consistParams = new List<ParameterDeclaration>();
+    ParameterDeclaration lastCheckPoint = new ParameterDeclaration(new Modifiers(), new TypeAccess("java.sql", "Timestamp"), "lastCheckPoint");
+    consistParams.add(lastCheckPoint);
+    ParameterDeclaration currentCheckPoint = new ParameterDeclaration(new Modifiers(), new TypeAccess("java.sql", "Timestamp"), "currentCheckPoint");
+    consistParams.add(currentCheckPoint);
+    MethodDecl consistDecl = new MethodDecl(msConsist, new PrimitiveTypeAccess("void"), "ensureConsistency", consistParams, new List<Access>(), new Opt(blockConsist));
+
+    // setUpstream method
+    Modifiers msSetu = new Modifiers();
+    msSetu.addModifier(new Modifier("public"));
+    Block blockSetu = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("setUpstream", new List<Expr>().add(parseName("o")).add(parseName("n")))));
+	blockSetu.addStmt(s);
+	break;
+      }
+    }
+    List<ParameterDeclaration> paramsSetu = new List<ParameterDeclaration>();
+    ParameterDeclaration setUo = new ParameterDeclaration(new Modifiers(), new TypeAccess("signalj.timeseries", "SignalClassInstance"), "o");
+    ParameterDeclaration setUn = new ParameterDeclaration(new Modifiers(), new TypeAccess("signalj.timeseries", "SignalClassInstance"), "n");
+    paramsSetu.add(setUo).add(setUn);
+    MethodDecl setUDecl = new MethodDecl(msSetu, new PrimitiveTypeAccess("void"), "setUpstream", paramsSetu, new List<Access>(), new Opt(blockSetu));
+
+    // set method
+    Modifiers msSet = new Modifiers();
+    msSet.addModifier(new Modifier("public"));
+    Block blockSet = new Block(new List<Stmt>());
+    List<ParameterDeclaration> paramsSet = new List<ParameterDeclaration>();
+    if (ps != null) {
+      for (Variable p : ps) {
+        if (p.isPersistentSignal(ps)) {
+          if (p.getInit() == null) {
+            Stmt s = new ExprStmt(new AssignSimpleExpr(new ThisAccess().qualifiesAccess(parseName(p.name())),
+                                 parseName(p.name())));
+            blockSet.addStmt(s);
+            Variable paramV = memberFieldsMap().get(p.name()).singletonValue();
+	    Access paramType = ((TypeAccess)((ParTypeAccess)paramV.fieldDecl().getTypeAccess()).getTypeArgument(0)).primitiveTypeConversion();
+            ParameterDeclaration pm = new ParameterDeclaration(new Modifiers(), paramType, p.name());
+	    paramsSet.add(pm);
+          } else {
+            Stmt s = new ExprStmt(new AssignSimpleExpr(new ThisAccess().qualifiesAccess(parseName(p.name())),
+                                 p.getInit()));
+            blockSet.addStmt(s);
+          }
+        }
+      }
+    }
+    MethodDecl setDecl = new MethodDecl(msSet, new PrimitiveTypeAccess("void"), "set", paramsSet, new List<Access>(), new Opt(blockSet));
+
+    // reval method
+    Modifiers msReval = new Modifiers();
+    msReval.addModifier(new Modifier("public"));
+    Block blockReval = new Block(new List<Stmt>());
+    boolean composite = true;
+    if (ps != null) {
+      for (Variable p : ps) {
+        if (p.getInit() == null) {
+          composite = false;
+          break;
+        }
+      }
+      if (composite) {
+        for (Variable p : ps) {
+          Stmt s = new ExprStmt(new AssignSimpleExpr(new ThisAccess().qualifiesAccess(parseName(p.name())), p.getInit()));
+          blockReval.addStmt(s);
+        }
+      } else {
+        List<Expr> args = new List<Expr>();
+        for (Variable p : ps) {
+          if (p.getInit() == null) {
+            args.add(parseName(p.name()).qualifiesAccess(new MethodAccess("value", new List<Expr>())));
+          }
+        }
+        Stmt s = new ExprStmt(new ThisAccess().qualifiesAccess(new MethodAccess("set", args)));
+        blockReval.addStmt(s);
+      }
+    }
+    MethodDecl revalDecl = new MethodDecl(msReval, new PrimitiveTypeAccess("void"), "reval", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockReval));
+
+    // isInitalizedMethod
+    Modifiers msIsi = new Modifiers();
+    msIsi.addModifier(new Modifier("public"));
+    Block blockIsi = new Block(new List<Stmt>());
+    boolean isiBool = false;
+    if (ps != null) {
+      for (Variable p : ps) {
+        if (p.getInit() == null) {
+          Stmt s = new ReturnStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("isInitialized", new List<Expr>())));
+          blockIsi.addStmt(s);
+          isiBool = true;
+	  break;
+        }
+      }
+    }
+    if (!isiBool) {
+      blockIsi.addStmt(new ReturnStmt(new BooleanLiteral("true")));
+    }
+    MethodDecl isiDecl = new MethodDecl(msIsi, new PrimitiveTypeAccess("boolean"), "isInitialized", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockIsi));
+
+    // block
+    Modifiers msBlock = new Modifiers();
+    msBlock.addModifier(new Modifier("public"));
+    Block blockBlock = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("block", new List<Expr>())));
+	blockBlock.addStmt(s);
+      }
+    }
+    MethodDecl blockDecl = new MethodDecl(msBlock, new PrimitiveTypeAccess("void"), "block", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockBlock));
+
+    // unblock
+    Modifiers msUnblock = new Modifiers();
+    msUnblock.addModifier(new Modifier("public"));
+    Block blockUnblock = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("unblock", new List<Expr>())));
+	blockUnblock.addStmt(s);
+      }
+    }
+    MethodDecl unblockDecl = new MethodDecl(msUnblock, new PrimitiveTypeAccess("void"), "unblock", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockUnblock));
+
+    // snapshot
+    Modifiers msSett = new Modifiers();
+    msSett.addModifier(new Modifier("public"));
+    Block blockSett = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("snapshot", new List<Expr>().add(parseName("ts")))));
+        blockSett.addStmt(s);
+      }
+    }
+    List<ParameterDeclaration> settParams = new List<ParameterDeclaration>();
+    ParameterDeclaration ts = new ParameterDeclaration(new Modifiers(), new TypeAccess("java.sql", "Timestamp"), "ts");
+    settParams.add(ts);
+    MethodDecl settDecl = new MethodDecl(msSett, new PrimitiveTypeAccess("void"), "snapshot", settParams, new List<Access>(), new Opt(blockSett));
+
+    // updateSwitchHistory
+    Modifiers msUsh = new Modifiers();
+    msUsh.addModifier(new Modifier("public"));
+    Block blockUsh = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("updateSwitchHistory", new List<Expr>())));
+	blockUsh.addStmt(s);
+	break;
+      }
+    }
+    MethodDecl ushDecl = new MethodDecl(msUsh, new PrimitiveTypeAccess("void"), "updateSwitchHistory", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockUsh));
+
+    // addExternSync
+    Modifiers msAes = new Modifiers();
+    msAes.addModifier(new Modifier("public"));
+    Block blockAes = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("addExternSync", new List<Expr>().add(parseName("sync")))));
+        blockAes.addStmt(s);
+      }
+    }
+    List<ParameterDeclaration> aesParams = new List<ParameterDeclaration>();
+    ParameterDeclaration sync = new ParameterDeclaration(new Modifiers(), new TypeAccess("signalj.timeseries", "Synchronizer"), "sync");
+    aesParams.add(sync);
+    MethodDecl aesDecl = new MethodDecl(msAes, new PrimitiveTypeAccess("void"), "addExternSync", aesParams, new List<Access>(), new Opt(blockAes));
+
+    // addDown
+    Modifiers msAd = new Modifiers();
+    msAd.addModifier(new Modifier("public"));
+    Block blockAd = new Block(new List<Stmt>());
+    if (ps != null) {
+      for (Variable p : ps) {
+        Stmt s = new ExprStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("addDown", new List<Expr>().add(parseName("down")))));
+	blockAd.addStmt(s);
+	break;
+      }
+    }
+    List<ParameterDeclaration> adParams = new List<ParameterDeclaration>();
+    ParameterDeclaration down = new ParameterDeclaration(new Modifiers(), new TypeAccess("signalj.timeseries", "Synchronizer"), "down");
+    adParams.add(down);
+    MethodDecl adDecl = new MethodDecl(msAd, new PrimitiveTypeAccess("void"), "addDown", adParams, new List<Access>(), new Opt(blockAd));
+
+    // getID
+    Modifiers msId = new Modifiers();
+    msId.addModifier(new Modifier("public"));
+    Block blockId = new Block(new List<Stmt>());
+    blockId.addStmt(new ReturnStmt(parseName("__DBName__")));
+    MethodDecl idDecl = new MethodDecl(msId, new TypeAccess("java.lang", "String"), "getID", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockId));
+
+    // getSynchronizer
+    Modifiers msSync = new Modifiers();
+    msSync.addModifier(new Modifier("public"));
+    Block blockSync = new Block(new List<Stmt>());
+    blockSync.addStmt(new ReturnStmt(parseName("sync")));
+    MethodDecl syncDecl = new MethodDecl(msSync, new TypeAccess("signalj.timeseries", "Synchronizer"), "getSynchronizer", new List<ParameterDeclaration>(), new  List<Access>(), new Opt(blockSync));
+
+    // latestTimeStamp
+    Modifiers msLts = new Modifiers();
+    msLts.addModifier(new Modifier("public"));
+    Block blockLts = new Block(new List<Stmt>());
+    boolean ltsBool = false;
+    if (ps != null) {
+      for (Variable p : ps) {
+//        if (p.getInit() == null) {
+          Stmt s = new ReturnStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("latestTimestamp", new List())));
+          blockLts.addStmt(s);
+          ltsBool = true;
+          break;
+//        }
+      }
+    }
+    if (!ltsBool) {
+      blockLts.addStmt(new ReturnStmt(new NullLiteral("null")));
+    }
+    MethodDecl ltsDecl = new MethodDecl(msLts, new TypeAccess("java.sql", "Timestamp"), "latestTimestamp", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockLts));
+
+    // firstTimeStamp
+    Modifiers msFts = new Modifiers();
+    msFts.addModifier(new Modifier("public"));
+    Block blockFts = new Block(new List<Stmt>());
+    boolean ftsBool = false;
+    if (ps != null) {
+      for (Variable p : ps) {
+//        if (p.getInit() == null) {
+          Stmt s = new ReturnStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("firstTimestamp", new List())));
+          blockFts.addStmt(s);
+          ftsBool = true;
+          break;
+//        }
+      }
+    }
+    if (!ftsBool) {
+      blockFts.addStmt(new ReturnStmt(new NullLiteral("null")));
+    }
+    MethodDecl ftsDecl = new MethodDecl(msFts, new TypeAccess("java.sql", "Timestamp"), "firstTimestamp", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockFts));
+
+    // timestampList
+    Modifiers msTsl = new Modifiers();
+    msTsl.addModifier(new Modifier("public"));
+    Block blockTsl = new Block(new List<Stmt>());
+    boolean tslBool = false;
+    if (ps != null) {
+      for (Variable p : ps) {
+//        if (p.getInit() == null) {
+          Stmt s = new ReturnStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("timestampList", new List())));
+          blockTsl.addStmt(s);
+          tslBool = true;
+          break;
+//        }
+      }
+    }
+    if (!tslBool) {
+      blockTsl.addStmt(new ReturnStmt(new NullLiteral("null")));
+    }
+    MethodDecl tslDecl = new MethodDecl(msTsl, new ParTypeAccess(new TypeAccess("java.util", "Vector"), new List<Access>().add(new TypeAccess("java.sql", "Timestamp"))), "timestampList", new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockTsl));
+
+    addBodyDecl(disDecl);
+    addBodyDecl(resDecl);
+    addBodyDecl(setUDecl);
+    addBodyDecl(setDecl);
+    addBodyDecl(revalDecl);
+    addBodyDecl(isiDecl);
+    addBodyDecl(blockDecl);
+    addBodyDecl(unblockDecl);
+    addBodyDecl(settDecl);
+    addBodyDecl(ushDecl);
+    addBodyDecl(idDecl);
+    addBodyDecl(syncDecl);
+    addBodyDecl(adDecl);
+    addBodyDecl(consistDecl);
+    addBodyDecl(ltsDecl);
+    addBodyDecl(ftsDecl);
+    addBodyDecl(tslDecl);
+    addBodyDecl(aesDecl);
+
+    // getters
+    if (ps != null) {
+      for (Variable p : ps) {
+        Modifiers msGet = new Modifiers();
+        msGet.addModifier(new Modifier("public"));
+        Block blockGet = new Block(new List<Stmt>());
+        blockGet.addStmt(new ReturnStmt(parseName(p.name()).qualifiesAccess(new MethodAccess("value", new List()))));
+        char[] upperA = p.name().toCharArray();
+        upperA[0] = Character.toUpperCase(upperA[0]);
+        String upper = new String(upperA);
+        Variable retV = memberFieldsMap().get(p.name()).singletonValue();
+        Access retType = ((TypeAccess)((ParTypeAccess)retV.fieldDecl().getTypeAccess()).getTypeArgument(0)).primitiveTypeConversion();
+        MethodDecl getDecl = new MethodDecl(msGet, retType, "get" + upper, new List<ParameterDeclaration>(), new List<Access>(), new Opt(blockGet));
+        addBodyDecl(getDecl);
+      }
+    }
+  }
+
+  public void ClassDecl.removeSignalModifier() {
+    List<Modifier> ms = getModifiers().getModifiers();
+    Modifiers newMs = new Modifiers();
+    for (int i=0; i<ms.getNumChildNoTransform(); i++) {
+      Modifier m = ms.getChildNoTransform(i);
+      if (!m.getID().equals("signal")) newMs.addModifier(m);
+    }
+    setModifiers(newMs);
+  }
+
+  public void ClassDecl.insertPrivateFields() {
+    List<BodyDecl> decls = getBodyDecls();
+    Modifiers baseName = new Modifiers(), dbName = new Modifiers(), sync = new Modifiers();
+    baseName.addModifier(new Modifier("private"));
+    dbName.addModifier(new Modifier("private"));
+    sync.addModifier(new Modifier("private"));
+    decls.add(new FieldDecl(baseName,
+                            new TypeAccess("java.lang", "String"),
+                            new List<FieldDeclarator>().add(new FieldDeclarator("__BaseName__", new List<Dims>(), new Opt<Expr>()))))
+         .add(new FieldDecl(dbName,
+                            new TypeAccess("java.lang", "String"),
+                            new List<FieldDeclarator>().add(new FieldDeclarator("__DBName__", new List<Dims>(), new Opt<Expr>()))))
+         .add(new FieldDecl(sync,
+                            new TypeAccess("signalj.timeseries", "Synchronizer"),
+                            new List<FieldDeclarator>().add(new FieldDeclarator("sync", new List<Dims>(), new Opt<Expr>()))));
+  }
+
+  public void CompilationUnit.printPersistentInitTable() {
+    Set<String> keys = Program.persistentInitTable.keySet();
+    for (String key : keys) {
+      System.out.println("Class " + key + ":");
+      Vector<Variable> inits = Program.persistentInitTable.get(key);
+      for (Variable v : inits) {
+        System.out.println(v.name() + ": " + (v.getInit() != null ? v.getInit().prettyPrint() : null));
+      }
+    }
+  }
+
+  protected void ASTNode.getClassDecls(Vector<ClassDecl> classes) {
+    for (int i=0; i<getNumChildNoTransform(); i++) {
+      ASTNode node = getChildNoTransform(i);
+      if (node instanceof ClassDecl) classes.add((ClassDecl)node);
+      node.getClassDecls(classes);
+    }
+  }
+
+  protected boolean ASTNode.hasPersistentReceiver(Vector<Variable> vec) {
+    if (this instanceof Dot) {
+      Expr left = ((Dot)this).getLeft();
+      if (left instanceof VarAccess) {
+        for (Variable v : vec)
+          if (((VarAccess)left).name().equals(v.name())) return true;
+      }
+    }
+    return false;
+  }
+
+  public boolean Variable.isPersistentSignal(Vector<Variable> vec) {
+    Expr init = getInit();
+    if (init == null) return true;
+    if (!init.hasPersistentReceiver(vec)) return true;
+    return false;
+  }
+
+  public void ConstructorDecl.insertPersistentOperations(String pkg, String name, HashMap<String,String> persistentType, Vector<Variable> vec) {
+    List<Stmt> stmts = getBlock().getStmtList();
+    Vector<Stmt> tmp = new Vector<Stmt>();
+    int numChild = stmts.getNumChildNoTransform();
+    for (int i=0; i<numChild; i++) {
+      tmp.add(stmts.getChild(0));
+      stmts.removeChild(0);
+    }
+
+    stmts.add(new ExprStmt(new AssignSimpleExpr(parseName("__BaseName__"),
+                           new StringLiteral(pkg + "_" + name))));
+
+    // we need to check that the constructor has the parameter "id"
+    stmts.add(new ExprStmt(new AssignSimpleExpr(parseName("__DBName__"),
+                           new AddExpr(parseName("__BaseName__"),
+                                       new AddExpr(new StringLiteral("_"), parseName("id"))))));
+
+    List<Expr> columnsInit = new List<Expr>();
+    if (vec != null) {
+      for (Variable v : vec) {
+        if (v.isPersistentSignal(vec)) {
+          columnsInit.add(new StringLiteral(v.name() + " " + persistentType.get(v.name())));
+        }
+      }
+    }
+    stmts.add(new VarDeclStmt(new Modifiers(),
+                              new ArrayTypeAccess(new TypeAccess("java.lang", "String")),
+                              new List<VariableDeclarator>().add(new VariableDeclarator("columns", new List<Dims>(), new Opt<Expr>(new ArrayInit(columnsInit))))));
+
+    stmts.add(new ExprStmt(parseName("signalj").qualifiesAccess(parseName("timeseries")).qualifiesAccess(parseName("Timeseries")).qualifiesAccess(new MethodAccess("createDBIfNotExist", new List<Expr>().add(parseName("__DBName__")).add(parseName("columns"))))));
+
+    stmts.add(new ExprStmt(new AssignSimpleExpr(parseName("sync"),
+                                                new ClassInstanceExpr(new TypeAccess("signalj.timeseries", "Synchronizer"), new List<Expr>().add(parseName("__DBName__")).add(new ThisAccess())))));
+
+    // inserting persistent signal initializations
+    if (vec != null) {
+      for (Variable v : vec) {
+        String id = v.name();
+        if (v.isPersistentSignal(vec)) { // persistent signals
+          stmts.add(new ExprStmt(new AssignSimpleExpr(parseName(id),
+                                                      parseName("signalj").qualifiesAccess(parseName("timeseries")).qualifiesAccess(parseName("TimescaleFactory")).qualifiesAccess(new MethodAccess("newPersistent", new List<Expr>().add(parseName("__DBName__")).add(new StringLiteral(id)).add(parseName("sync")))))));
+
+          stmts.add(new ExprStmt(parseName("sync").qualifiesAccess(new MethodAccess("add", new List<Expr>().add(parseName(id))))));
+          stmts.add(new ExprStmt(parseName(id).qualifiesAccess(new MethodAccess("setSignalClassInst", new List<Expr>().add(new ThisAccess())))));
+          stmts.add(new ExprStmt(parseName(id).qualifiesAccess(new MethodAccess("resume", new List<Expr>()))));
+          Vector<VarAccess> deps = Program.persistentDependency.get(pkg + "." + name);
+          for (VarAccess vara : deps) {
+            stmts.add(new ExprStmt(parseName("sync").qualifiesAccess(new MethodAccess("addExtern", new List<Expr>().add(vara)))));
+	    stmts.add(new IfStmt(new NEExpr(vara, new NullLiteral("null")) ,new ExprStmt(vara.qualifiesAccess(new MethodAccess("addExternSync", new List<Expr>().add(parseName("sync"))))), new Opt()));
+          }
+	  stmts.add(new ExprStmt(parseName("sync").qualifiesAccess(new MethodAccess("updateSource", new List<Expr>()))));
+	  stmts.add(new ExprStmt(parseName("sync").qualifiesAccess(new MethodAccess("synchronize", new List<Expr>()))));
+        } else { // view signals
+          v.getInit().insertPersistentName(id);
+          stmts.add(new ExprStmt(new AssignSimpleExpr(parseName(id), v.getInit())));
+
+          // force to access declaration after rewriting
+          int j = stmts.getNumChildNoTransform();
+          Stmt s = stmts.getChild(j-1);
+          Expr dest = ((AssignSimpleExpr)((ExprStmt)s).getExpr()).getDest();
+          ((FieldDeclarator)((VarAccess)dest).decl()).flushAttrCache();
+
+          stmts.add(new ExprStmt(parseName(id).qualifiesAccess(new MethodAccess("dbgen", new List<Expr>()))));
+        }
+      }
+
+      for (Stmt s : tmp) {
+        stmts.add(s);
+      }
+    }
+
+    // updating the switch history
+    stmts.add(new ExprStmt(new MethodAccess("updateSwitchHistory", new List<Expr>())));
+
+    // finally, add this instance to the mapping maintaining the signal class instances
+    stmts.add(new ExprStmt(parseName("signalj").qualifiesAccess(parseName("timeseries")).qualifiesAccess(parseName("Timeseries")).qualifiesAccess(new MethodAccess("putInstance", new List<Expr>().add(parseName("id")).add(new ThisAccess())))));
+  }
+
+  public void ASTNode.recursiveFlush() {
+    flushAttrCache();
+    if (children == null) return;
+    for (ASTNode n : children) {
+      if (n != null) n.recursiveFlush();
+    }
+  }
+
+  public void ASTNode.persistentNames(Vector<String> res, Vector<Variable> inits) {
+    if (children == null) return;
+    for (ASTNode n : children) {
+      if (n instanceof ParseName) {
+        String name = ((ParseName)n).name();
+        for (Variable v : inits)
+          if (v.name().equals(name)) res.add(name);
+      } else {
+        if (n != null) n.persistentNames(res, inits);
+      }
+    }
+  }
+
+  public void ASTNode.insertPersistentName(String id) {
+    if (children == null) return;
+    for (ASTNode n : children) {
+      if (n instanceof MethodAccess) {
+        ((MethodAccess)n).getArgs().add(new StringLiteral(id));
+        return;
+      }
+      n.insertPersistentName(id);
+    }
+  }
+
+  // This should be parametrized
+  //public String ClassDecl.persistentType = "INTEGER";
+  public HashMap<String,String> ClassDecl.persistentType = new HashMap();
+
+  public boolean ConstructorDecl.hasPersistentInsertion = false;
+  refine SignalValue public void ConstructorDecl.rewriteSignalTypes() {
+    if (!hasPersistentInsertion) getBlock().rewriteSignalTypes();
+  }
+
+  public void ClassDecl.updateConstructors(String pkg) {
+    Collection<ConstructorDecl> cs = constructors();
+    for (ConstructorDecl c : cs) {
+      c.hasPersistentInsertion = true;
+      c.insertPersistentOperations(pkg, getID(), persistentType, sortFields(Program.persistentInitTable.get(pkg + "." + getID())));
+      c.addException(new TypeAccess("signalj.timeseries", "DoubleInstanceException"));
+    }
+  }
+
+  private Variable ClassDecl.searchPersistentVariable(Vector<Variable> fs, String name) {
+    for (Variable f : fs) if (f.name().equals(name)) return f;
+    return null;
+  }
+
+  private Vector<Variable> ClassDecl.sortFields(Vector<Variable> fs) {
+    Vector<Variable> tmp = new Vector<Variable>();
+    boolean flag = false;
+    if (fs == null) return fs;
+    Vector<Variable> clone = (Vector<Variable>)fs.clone();
+    while (true) {
+      flag = false;
+      for (Variable v : fs) {
+        Vector<String> pss = new Vector<String>();
+        if (!v.isPersistentSignal(fs)) v.getInit().persistentNames(pss, fs);
+        for (String s : pss) {
+          Variable w = searchPersistentVariable(clone, s);
+          clone.remove(w);
+          clone.add(clone.indexOf(v),w);
+        }
+      }
+      for (int i=0; i<fs.size(); i++) {
+        if (!fs.elementAt(i).name().equals(clone.elementAt(i).name())) flag = true;
+      }
+      fs = (Vector<Variable>)clone.clone();
+      if (!flag) break;
+    } 
+    return fs;
+  }
+
+  syn lazy boolean ClassDecl.isSignalClass() = getModifiers().isSignal();
+
+  public void ClassDecl.updatePersistentInitTable(String pkg) {
+    Map<String,SimpleSet<Variable>> map = memberFieldsMap();
+    Set<String> keys = map.keySet();
+    Vector<Variable> inits = new Vector<Variable>();
+    Vector<FieldDecl> toBeRewrite = new Vector<FieldDecl>();
+    Vector<FieldDeclarator> compPersistent = new Vector<FieldDeclarator>();
+    Vector<VarAccess> sources = new Vector<VarAccess>();
+    for (String key : keys) {
+      SimpleSet<Variable> fs = map.get(key);
+      for (Variable v : fs) {
+        if (v instanceof FieldDeclarator) {
+          FieldDecl fDecl = (FieldDecl)((FieldDeclarator)v).fieldDecl();
+          FieldDeclarator f = fDecl.getField(v.name());
+          if (f == null) return;
+          if (f.getInit() != null) {
+            if (f.getInit().containsPersistent()) {
+              FieldDeclarator fNew = f.fullCopy();
+              fNew.setParent(f.getParent());
+              inits.add(fNew);
+              toBeRewrite.add(fDecl);
+              compPersistent.add(f);
+//              Vector<VarAccess> vva = f.getInit().lookupSignalClassInstance();
+//              for (VarAccess va : vva) sources.add(va);
+            }
+          } else {
+            if (f.getModifiers().isPersistent()) {
+              FieldDeclarator fNew = f.fullCopy();
+              fNew.setParent(f.getParent());
+              inits.add(fNew);
+              toBeRewrite.add(fDecl);
+            }
+          }
+        }
+      }
+    }
+    for (FieldDecl f : toBeRewrite) f.rewriteSignal();
+    for (FieldDeclarator f : compPersistent) {
+      Vector<VarAccess> vva = f.getInit().lookupSignalClassInstance();
+      for (VarAccess va : vva) sources.add(va);
+    }
+
+    // Then, remove field initializers from persistent/view signals
+    for (String key : keys) {
+      SimpleSet<Variable> fs = map.get(key);
+      for (Variable v : fs) {
+        if (v instanceof FieldDeclarator) {
+          FieldDecl fDecl = (FieldDecl)((FieldDeclarator)v).fieldDecl().rewrittenNode();
+          FieldDeclarator f = fDecl.getField(v.name());
+          if (f == null) return;
+          if (inits.contains(f)) f.setInitOpt(new Opt<Expr>());
+        }
+      }      
+    }
+    if (!inits.isEmpty()) {
+      Program.persistentInitTable.put(pkg + "." + getID(), inits);
+      Program.persistentDependency.put(pkg + "." + getID(), sources);
+    }
+  }
+
+  public boolean FieldDeclarator.equals(Object o) {
+    if (o instanceof FieldDeclarator) {
+      return getID().equals(((FieldDeclarator)o).getID());
+    }
+    return false;
+  }
+
+  public FieldDeclarator FieldDecl.getField(String name) {
+    Collection<FieldDeclarator> fs = fieldDeclarations();
+    for (FieldDeclarator f : fs) {
+      if (f.getID().equals(name)) return f;
+    }
+    return null;
+  }
+
+  public void FieldDecl.rewriteSignal() {
+    if (!rewritten) {
+      List<Modifier> ms = getModifiers().getModifiers();
+      Modifiers newMs = new Modifiers();
+      String rewriteName = rewriteTypeName(getTypeAccess(),false);
+      String rewriteNameSQL = rewriteTypeName(getTypeAccess(),true);
+      ParTypeAccess ta = new ParTypeAccess(
+                               new TypeAccess("signalj.timeseries", "PersistentSignal"),
+                               new List<Access>().add(new TypeAccess("java.lang", rewriteName)));
+      for (int i=0; i<ms.getNumChildNoTransform(); i++) {
+        Modifier m = ms.getChildNoTransform(i);
+        if (!m.getID().equals("persistent") && !m.getID().equals("signal"))
+          newMs.addModifier(m);
+        if (m.getID().equals("signal"))
+          //getEnclosingClass().persistentType = rewriteNameSQL;
+	  for (FieldDeclarator decl : getDeclarators()) {
+            getEnclosingClass().persistentType.put(decl.getID(),rewriteNameSQL);
+          }
+      }
+      setModifiers(newMs);
+      setTypeAccess(ta);
+      rewritten = true;
+    }
+  }
+
+  private String FieldDecl.rewriteTypeName(Access a, boolean sql) {
+    String name = ((TypeAccess)a).getID();
+    if (name.equals("byte")) {
+      return sql ? "SMALLINT" : "Byte";
+    } else if (name.equals("short")) {
+      return sql ? "SMALLINT" : "Short";
+    } else if (name.equals("int")) {
+      return sql ? "INTEGER" : "Integer";
+    } else if (name.equals("long")) {
+      return sql ? "BIGINT" : "Long";
+    } else if (name.equals("float")) {
+      return sql ? "REAL" : "Float";
+    } else if (name.equals("double")) {
+      return sql ? "DOUBLE PRECISION" : "Double";
+    } else if (name.equals("boolean")) {
+      return sql ? "BOOLEAN" : "Boolean";
+    } else if (name.equals("String")) {
+      return sql ? "TEXT" : "String";
+    }
+    return null;
+  }
+
+  public Vector<VarAccess> Expr.lookupSignalClassInstance() {
+    Vector<VarAccess> retval = new Vector<VarAccess>();
+    if (this instanceof VarAccess) {
+      VarAccess va = (VarAccess)this;
+      if (va.isSignalClassInstance()) retval.add(va);      
+    } else {
+      for (int i=0; i<getNumChild(); i++) {
+        ASTNode n = getChild(i);
+        if (n instanceof Expr) {
+          Vector<VarAccess> r = ((Expr)n).lookupSignalClassInstance();
+          for (VarAccess va : r) retval.add(va);
+        }
+      }
+    }
+    return retval;
+  }
+
+}
